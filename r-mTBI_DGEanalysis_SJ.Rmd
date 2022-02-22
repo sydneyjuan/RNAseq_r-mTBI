@@ -1,0 +1,586 @@
+---
+Title: "r-mTBI_DGEanalysis_SJ.Rmd"
+Authors: Krista Dent & Sydney Juan
+Training: Krista Dent & Dr Thomas Harrop
+Supervisers: Prof Paul Adlard & Dr Maria Daglas
+Reference sources: 
+  RNA-seq analysis in R - Differential expression analysis. 
+  https://combine-australia.github.io/RNAseq-R/06-rnaseq-day1.html 
+  (Phipson, Trigos,Ritchie, Doyle, Dashnow and Law. 2016)
+  
+*************************************************************************
+(Make sure RMarkdown is running)
+
+*INDEX:
+  
+*SECTION 1: RSTUDIO SET-UP AND DATA PACKAGING*
+  *SECTION 1a: Reading in the data*
+	*SECTION 1b: Remove any duplicated gene names from countdata*
+	*SECTION 1c: Align sample names between sampleinfo and countdata*
+	*SECTION 1d: Convert counts to a DGEList object and annotate*
+
+*SECTION 2: FILTERING LOWLY EXPRESSED GENES*
+	*SECTION 2a: CPM and filtering*
+
+*SECTION 3: QUALITY CONTROL AND NORMALISATION*
+	*SECTION 3a: Plot library sizes*
+	*SECTION 3b: Log the counts*
+ 	*SECTION 3c: Build MDS Plot and heatmap*
+	*SECTION 3d: Apply normalisation*
+
+*SECTION 4: DIFFERENTIAL EXPRESSION ANALYSIS WITH LIMMA-VOOM*
+	*SECTION 4a: Create the design matrix*
+	*SECTION 4b: Voom transformation*
+	*SECTION 4c: Assess normalisation*
+	*SECTION 4d: Testing for DE - Build contrasts and apply to linear model*
+
+*SECTION 5: BUILD DGE LISTS FOR EACH COMPARISON AND EXPORT TO EXCEL*
+	*SECTION 5a: Top p-value excel charts*
+	*SECTION 5b: Plots after testing for DE*
+
+---
+
+*************************************************************************
+
+**SECTION 1: RSTUDIO SET-UP AND DATA PACKAGING**
+
+```{r Set directory -> Input your working directory}
+setwd("/Users/SydneyJuan/Documents/R analysis")
+getwd()
+```
+
+```{r Load packages} 
+suppressPackageStartupMessages({
+  library(edgeR)
+  library(limma)
+  library(Glimma)
+  library(gplots)
+  library(org.Mm.eg.db)
+  library(RColorBrewer)
+  library(dplyr)
+  library(tibble)
+  library(ggplot2)
+  library(ggsignif)
+  library(NMF)
+})
+```
+
+  *SECTION 1a: Reading in the data*
+
+```{r Read in Sample info}
+# Read the sample information into R
+sampleinfo <- read.delim("Sample_Info.txt",stringsAsFactors = TRUE)
+dim(sampleinfo)
+sampleinfo
+
+# Read the count data into R
+seqdata <- read.table(("New_Gene_Counts.txt"),stringsAsFactors = TRUE)
+dim(seqdata)
+head(seqdata)
+rownames(seqdata)
+
+# Create a new data object called countdata
+# Delete uncertain mapping features in rows 1-4
+countdata <- seqdata[-(1:4),]
+head(countdata)
+
+```
+ 
+  *SECTION 1b: Remove any duplicated gene names from countdata*
+  
+```{r Remove any duplicated gene names from countdata}
+
+anyDuplicated(rownames(countdata),incomparables = FALSE)
+
+```
+  
+  *SECTION 1c: Align sample names between sampleinfo and countdata*
+  
+```{r Check that columns in countdata are the same as Sample.name in sampleinfo}
+
+# Check alignment
+colnames(countdata)
+sampleinfo
+table(colnames(countdata)==sampleinfo$Sample.name)
+
+```
+
+  *SECTION 1d: Convert counts to a DGEList object and annotate*
+
+```{r Convert counts to a DGEList object}
+
+# Create a DGEList object. This is an object used by edgeR to store count data. It has a number of slots for storing various parameters about the data.
+y <- DGEList(countdata)
+
+# Have a look at y
+y
+
+# See what slots are stored in y
+names(y)
+
+# Library size information is stored in the samples slot
+y$samples
+
+```
+ 
+```{r Store the groups for the samples in the DGEList object}
+
+# We can also store the groups for the samples in the DGEList object
+group <- paste(sampleinfo$Injury,sampleinfo$Hemisphere,sampleinfo$Sex,sep=".")
+
+# Take a look
+group
+
+# Convert to factor
+group <- factor(group)
+
+# Take another look
+group
+
+# Add the group information into the DGEList
+y$samples$group <- group
+y$samples
+```
+
+```{r Annotation}
+columns(org.Mm.eg.db)
+
+ann <- select(org.Mm.eg.db,keys=rownames(y$counts),columns=c("ENTREZID","GENENAME"),keytype="SYMBOL")
+head(ann)
+
+# Double check that the ENTREZID column matches exactly to our y$counts rownames.
+table(ann$SYMBOL==rownames(y$counts))
+
+# Slot in the annotation information into the genes slot of y
+y$genes <- ann
+
+```
+
+*************************************************************************
+
+**SECTION 2: FILTERING LOWLY EXPRESSED GENES**
+  
+  *SECTION 2a: CPM and filtering*
+
+```{r Obtain CPM, set threshold}
+
+# Obtain CPMs
+myCPM <- cpm(countdata)
+
+# Have a look at the output
+myCPM[1:5,1:5] #to look at less of the data object
+
+```
+
+
+```{r Set threshold}
+
+# 0.5 CPM corresponds to read count of 10-15, which values in myCPM are greater than 0.5?
+thresh <- myCPM>0.5
+
+# This produces a logical matrix with TRUEs and FALSEs
+head(thresh)
+
+# Check summary table of how many TRUEs there are in each row
+table(rowSums(thresh))
+
+# There are 14755 genes that have TRUEs in all 40 samples
+
+```
+
+
+```{r We want to keep genes that have at least 3 TRUES in each row of thresh}
+
+keep <- rowSums(thresh)>=3
+summary(keep)
+
+```
+
+
+```{r Check whether threshold of 0.5CPM corresponds to a count of 10-15}
+
+# We will look at the first sample
+# Let us limit the x and y-axis so we can actually look to see what is happening at the smaller counts
+plot(myCPM[,1],countdata[,1],ylim=c(0,50),xlim=c(0,1),main = "Threshold Check: 0.5CPM",xlab = "Counts per million",ylab="Counts")
+
+# Add a vertical line at 0.5 CPM
+abline(v=0.5,col="blue")
+
+# Add a horizontal line from 10-15 counts
+abline(h=c(10:15),col="green")
+
+```
+
+
+```{r Filter the DGEList object}
+
+#The edgeR function filterByExpr can be used to perform this method of filtering automatically, as demonstrated in the limma, Glimma and edgeR workflow article (Charity W. Law et al. 2018)
+
+# Now that we’ve checked our filtering method we will filter the DGEList object
+keep.exprs <- filterByExpr(y, group=group)
+y <- y[keep.exprs,, keep.lib.sizes=FALSE]
+dim(y)
+
+```
+
+**SECTION 3: QUALITY CONTROL AND NORMALISATION**
+  
+  *SECTION 3a: Plot library sizes*
+
+```{r Library size}
+
+# Extract the library sizes from the samples of the y object
+# First, we can check how many reads we have for each sample in the y object
+y$samples$lib.size
+
+# Checking the mean and median library sizes for this dataset
+L <- mean(y$samples$lib.size) * 1e-6
+M <- median(y$samples$lib.size) * 1e-6
+c(L, M)
+
+#The median library size of 22 million. It's a smaller library size so it makes sense for the CPM cutoff to be larger. 
+
+```
+
+
+```{r Plot library sizes}
+
+# Plot the library sizes as a barplot to see whether there are any major discrepancies between samples
+
+barplot(y$samples$lib.size/1e06,names=colnames(y),las=2,cex.axis = 1, cex.names=0.6)
+mtext(side = 1, text = "Samples", line = 4)
+mtext(side = 2, text = "Library size (millions)", line = 3)
+title("Barplot of Library Sizes")
+
+```  
+  
+  *SECTION 3b: Log the counts*
+
+```{r Log conversion}
+
+# Get log2 counts per million
+logcounts <- cpm(y,log=TRUE)
+
+# Check distributions of samples using boxplots
+boxplot(logcounts,xlab="",ylab="Log2 counts per million",las=2)
+
+# Add a blue horizontal line that corresponds to the median logCPM
+abline(h=median(logcounts),col="red")
+title("Boxplots of logCPMs (unnormalised)")
+```
+ 
+  *SECTION 3c: Build MDS Plot and heatmap*
+
+```{r Plot colour-coded MDS and check for outliers}
+
+#Choose colours
+levels(sampleinfo$Sex)
+col.sex <- c("pink","blue")[sampleinfo$Sex]
+
+pdf("MDSplotSex.pdf") 
+
+#PlotMDS
+sampleinfo$Sex <- factor(sampleinfo$Sex)
+plotMDS(y,col=col.sex,dim.plot = 1:2)
+legend("topleft",fill=c("pink","blue"),legend=levels(sampleinfo$Sex), cex=0.6)
+title("MDS plot: Sexes")
+dev.off()
+
+#Choose colours
+levels(sampleinfo$Injury)
+col.injury <- c("blue","red")[sampleinfo$Injury]
+
+pdf("MDSplotInjury.pdf") 
+
+#PlotMDS
+sampleinfo$Injury <- factor(sampleinfo$Injury)
+plotMDS(y,col=col.injury,dim.plot = 1:2)
+legend("topleft",fill=c("blue","red"),legend=levels(sampleinfo$Injury), cex=0.6)
+title("MDS plot: Treatment groups")
+dev.off()
+
+#Choose colours
+levels(sampleinfo$Hemisphere)
+col.hemisphere <- c("orange","purple")[sampleinfo$Hemisphere]
+
+pdf("MDSplotHemisphere.pdf") 
+#PlotMDS
+sampleinfo$Hemisphere <- factor(sampleinfo$Hemisphere)
+plotMDS(y,col=col.hemisphere,dim.plot = 1:2)
+legend("topleft",fill=c("orange","purple"),legend=levels(sampleinfo$Hemisphere), cex=0.6)
+title("MDS plot: Hemispheres")
+dev.off()
+
+``` 
+  
+
+```{r Create an interactive MDS plot using the Glimma package}
+
+# Specify the labels (create groups) of the interactive MDS plots
+labels <- paste(sampleinfo$Sample.name,sampleinfo$Group,sampleinfo$Hemisphere,sampleinfo$Sex,sampleinfo$Injury)
+
+# Build the interactive MDS plot
+glMDSPlot(y,labels=labels,groups=group,folder="glimma-plots", html = "MDS-PLOT_ALL_GENES_SJ_DEC21") 
+
+```
+  
+
+```{r Gene variance}
+
+# We estimate the variance for each row in the logcounts matrix
+var_genes <- apply(logcounts,1,var)
+head(var_genes) #These numbers are the variance, not FDR
+
+```
+
+
+```{r Get the gene names for the top 50 variable genes}
+
+select_var <- names(sort(var_genes,decreasing = TRUE))[1:50]
+head(select_var)
+
+```
+
+
+```{r Create a subset of top 50 genes}
+
+highly_variable_lcpm <- logcounts[select_var,]
+dim(highly_variable_lcpm)
+highly_variable_lcpm[1:6,1:10]
+
+```
+
+
+```{r Hierarchical clustering - Heatmap}
+mypalette <- brewer.pal(11,"RdYlBu")
+morecols <- colorRampPalette(mypalette)
+
+# Set up colour vector for the Injury variable
+col.injury <- c("purple","orange")[sampleinfo$Injury]
+
+# Plot the heatmap
+heatmap.2(highly_variable_lcpm,col=rev(morecols(50)),trace="none", main="Top 50 most variable genes across injury groups",ColSideColors=col.injury,scale="row")
+
+pdf("Heatmap.pdf")
+# Adding more annotation using the aheatmap function from the NMF package
+mypalette <- brewer.pal(11,"RdYlBu")
+morecols <- colorRampPalette(mypalette)
+aheatmap(highly_variable_lcpm,col=rev(morecols(50)),main="Top 50 most variable genes across samples",annCol=sampleinfo[, 3:4],labCol=sampleinfo$Injury, scale="row")
+dev.off()
+
+```
+
+**SECTION 4: DIFFERENTIAL EXPRESSION ANALYSIS WITH LIMMA-VOOM**
+
+  *SECTION 4a: Create the design matrix*
+  
+```{r Specify a design matrix without an intercept term}
+
+# Look at group variable again
+group
+
+#Set up the design matrix
+design <- model.matrix(~0+group)
+
+#Clean up the names of the design matrix
+colnames(design) <- levels(group)
+design
+
+```
+
+  *SECTION 4b: Voom transformation*
+
+```{r Voom transform the data}
+
+par(mfrow=c(1,1))
+
+v <- voom(y,design,plot=TRUE)
+
+```
+
+```{r Check voom-transformed normalised log counts}
+
+# The voom normalised log2 counts can be found in v$E. Take a look at what is in the voom object.
+v
+
+#What is contained within this v object?
+names(v)
+
+#The voom normalised log2 counts can be found in v$E
+v$E[1:6,1:6]
+
+```
+
+  *SECTION 4c: Assess normalisation*
+
+```{r Compare unnormalised vs normalised boxplots}
+
+# Unnormalised boxplot
+par(mfrow=c(1,2))
+boxplot(logcounts,xlab="",ylab="log2 counts per million", las=2,main="Unnormalised logCPM",ylim=c(-7,14))
+abline(h=median(logcounts),col="red")
+
+# Voom transformed boxplot
+boxplot(v$E,xlab="", ylab="log2 counts per million",las=2,main="Voom transformed logCPM",ylim=c(-7,14))
+abline(h=median(v$E),col="red")
+
+# Samples were already consistent to begin with
+
+```
+
+  *SECTION 4d: Testing for DE - Build contrasts and apply to linear model*
+
+```{r Fit a linear model for each gene}
+
+fit <- lmFit(v)
+names(fit)
+
+```
+
+```{r Make the contrasts - comparisons we are interested in}
+
+# Contrast matrices
+
+cont.matrix <- makeContrasts(
+ ShamvsTBI=(TBI.Ipsilateral.Female+TBI.Contralateral.Female+TBI.Ipsilateral.Male+TBI.Contralateral.Male)-(Sham.Ipsilateral.Female+Sham.Contralateral.Female+Sham.Ipsilateral.Male+Sham.Contralateral.Male),
+ ShamvsTBI_Females=(TBI.Ipsilateral.Female+TBI.Contralateral.Female)-(Sham.Ipsilateral.Female+Sham.Contralateral.Female),
+ ShamvsTBI_Males=(TBI.Ipsilateral.Male+TBI.Contralateral.Male)-(Sham.Ipsilateral.Male+Sham.Contralateral.Male),
+ ShamvsTBI_Ipsi=(TBI.Ipsilateral.Male+TBI.Ipsilateral.Female)-(Sham.Ipsilateral.Male+Sham.Ipsilateral.Female),
+ ShamvsTBI_Contra=(TBI.Contralateral.Male+TBI.Contralateral.Female)-(Sham.Contralateral.Male+Sham.Contralateral.Female),
+ ShamvsTBI_Ipsi_Females=(TBI.Ipsilateral.Female-Sham.Ipsilateral.Female),
+ ShamvsTBI_Contra_Females=(TBI.Contralateral.Female-Sham.Contralateral.Female),
+ ShamvsTBI_Ipsi_Males=(TBI.Ipsilateral.Male-Sham.Ipsilateral.Male),
+ ShamvsTBI_Contra_Males=(TBI.Contralateral.Male-Sham.Contralateral.Male),
+ 
+ MalesvsFemales=(TBI.Ipsilateral.Female+Sham.Ipsilateral.Female+TBI.Contralateral.Female+Sham.Contralateral.Female)-(TBI.Ipsilateral.Male+Sham.Ipsilateral.Male+TBI.Contralateral.Male+Sham.Contralateral.Male),
+ MalevsFemale_Ipsi_TBI=(TBI.Ipsilateral.Male-TBI.Ipsilateral.Female),
+ MalevsFemale_Contra_TBI=(TBI.Contralateral.Male-TBI.Contralateral.Female),
+ MalevsFemale_Ipsi_Sham=(Sham.Ipsilateral.Male-Sham.Ipsilateral.Female),
+ MalevsFemale_Contra_Sham=(Sham.Contralateral.Male-Sham.Contralateral.Female),
+
+  levels=design)
+
+cont.matrix
+
+```
+
+
+```{r Fit contrast matrix, perform empirical bayes shrinkage, estimate moderated t-stats and p-values}
+
+# Fit to contrast matrix
+fit.cont <- contrasts.fit(fit,cont.matrix)
+
+#  Call the eBayes function, which performs empirical Bayes shrinkage on the variances, and estimates moderated t-statistics and the associated p-values
+fit.cont <- eBayes(fit.cont)
+
+# Check dimensions of the fit object
+dim(fit.cont)
+
+topTable(fit.cont, coef=1, n=10)
+qobj <- qvalue(topTable(fit.cont, coef=1, n=Inf)$P.Value)
+hist(topTable(fit.cont, coef=1, n=Inf)$P.Value,main="Histogram of P-values (Sham vs TBI)", 
+     xlab="P-values", 
+     border="black",
+     breaks=50)
+hist(qobj, main="Histogram of Q-values (Sham vs TBI)", 
+     xlab="Q-values")
+
+topTable(fit.cont, coef=14, n=10)
+qobj <- qvalue(topTable(fit.cont, coef=14, n=Inf)$P.Value)
+hist(topTable(fit.cont, coef=14, n=Inf)$P.Value, main="Histogram of P-values (Males vs Females)", 
+     xlab="P-values", 
+     border="black",
+     breaks=50)
+hist(qobj, main="Histogram of Q-values (Males vs Females)", 
+     xlab="Q-values")
+
+# Using limma decideTests function to generate a quick summary of DE genes for the contrasts
+
+summa.fit <- decideTests(fit.cont,method="separate", adjust.method = "BH", p.value = 0.05)
+summary(summa.fit)
+write.table(summary(summa.fit),file="Summary_of_Gene_Changes.xls",row.names = T,sep = "\t")
+
+```
+
+************************************************************************************************************************
+
+**SECTION 5: BUILD DGE LISTS FOR EACH COMPARISON AND EXPORT TO EXCEL**
+
+  *SECTION 5a: Top p-value excel charts*
+  
+```{r Sort genes based on p value for each comparison, top 50}
+
+fit.cont$genes <- rownames(fit.cont)
+
+# Contrast matrices #1-14
+
+top_ShamvsTBI <- topTable(fit.cont,coef=1,sort.by="p",50)
+top_ShamvsTBI_Females <- topTable(fit.cont,coef=2,sort.by="p",50)
+top_ShamvsTBI_Males <- topTable(fit.cont,coef=3, sort.by="p",50)
+top_ShamvsTBI_Ipsi <- topTable(fit.cont,coef=4, sort.by="p",50)
+top_ShamvsTBI_Contra <- topTable(fit.cont,coef=5,sort.by="p",50)
+top_ShamvsTBI_Ipsi_Females <- topTable(fit.cont,coef=6,sort.by="p",50)
+top_ShamvsTBI_Contra_Females <- topTable(fit.cont,coef=7,sort.by="p",50)
+top_ShamvsTBI_Ipsi_Males <- topTable(fit.cont,coef=8,sort.by="p",50)
+top_ShamvsTBI_Contra_Males <- topTable(fit.cont,coef=9,sort.by="p",50)
+top_MalesvsFemales <- topTable(fit.cont,coef=10,sort.by="p",50)
+top_MalesvsFemales_Ipsi_TBI <- topTable(fit.cont,coef=11,sort.by="p",50)
+top_MalesvsFemales_Contra_TBI <- topTable(fit.cont,coef=12,sort.by="p",50)
+top_MalesvsFemales_Ipsi_Sham <- topTable(fit.cont,coef=13,sort.by="p",50)
+top_MalesvsFemales_Contra_Sham <- topTable(fit.cont,coef=14,sort.by="p",50)
+
+# Write genes of interest and logcount data into excel files for p-Values
+
+dir.create("p-value_Top")
+
+# Contrast matrices #1-14
+
+write.table((merge(top_ShamvsTBI,v$E,by.x="row.names",by.y = "row.names",incomparables=NULL,sort=F))[,-1],file.path("p-value_Top","Top50_top_ShamvsTBI.xls"),row.names=F,sep="\t")
+
+write.table((merge(top_ShamvsTBI_Females,v$E,by.x="row.names",by.y = "row.names",incomparables=NULL,sort=F))[,-1],file.path("p-value_Top","Top50_top_ShamvsTBI_Females.xls"),row.names=F,sep="\t")
+
+write.table((merge(top_ShamvsTBI_Males,v$E,by.x="row.names",by.y = "row.names",incomparables=NULL,sort=F))[,-1],file.path("p-value_Top","Top50_top_ShamvsTBI_Males.xls"),row.names=F,sep="\t")
+
+write.table((merge(top_ShamvsTBI_Ipsi,v$E,by.x="row.names",by.y = "row.names",incomparables=NULL,sort=F))[,-1],file.path("p-value_Top","Top50_top_ShamvsTBI_Ipsi.xls"),row.names=F,sep="\t")
+
+write.table((merge(top_ShamvsTBI_Contra,v$E,by.x="row.names",by.y = "row.names",incomparables=NULL,sort=F))[,-1],file.path("p-value_Top","Top50_top_ShamvsTBI_Contra.xls"),row.names=F,sep="\t")
+
+write.table((merge(top_ShamvsTBI_Ipsi_Females,v$E,by.x="row.names",by.y = "row.names",incomparables=NULL,sort=F))[,-1],file.path("p-value_Top","Top50_top_ShamvsTBI_Ipsi_Females.xls"),row.names=F,sep="\t")
+
+write.table((merge(top_ShamvsTBI_Contra_Females,v$E,by.x="row.names",by.y = "row.names",incomparables=NULL,sort=F))[,-1],file.path("p-value_Top","Top50_top_ShamvsTBI_Contra_Females.xls"),row.names=F,sep="\t")
+
+write.table((merge(top_ShamvsTBI_Ipsi_Males,v$E,by.x="row.names",by.y = "row.names",incomparables=NULL,sort=F))[,-1],file.path("p-value_Top","Top50_top_ShamvsTBI_Ipsi_Males.xls"),row.names=F,sep="\t")
+
+write.table((merge(top_ShamvsTBI_Contra_Males,v$E,by.x="row.names",by.y = "row.names",incomparables=NULL,sort=F))[,-1],file.path("p-value_Top","Top50_top_ShamvsTBI_Contra_Males.xls"),row.names=F,sep="\t")
+
+write.table((merge(top_MalesvsFemales,v$E,by.x="row.names",by.y = "row.names",incomparables=NULL,sort=F))[,-1],file.path("p-value_Top","Top50_top_MalesvsFemales.xls"),row.names=F,sep="\t")
+
+write.table((merge(top_MalesvsFemales_Ipsi_TBI,v$E,by.x="row.names",by.y = "row.names",incomparables=NULL,sort=F))[,-1],file.path("p-value_Top","Top50_top_MalesvsFemales_Ipsi_TBI.xls"),row.names=F,sep="\t")
+
+write.table((merge(top_MalesvsFemales_Contra_TBI,v$E,by.x="row.names",by.y = "row.names",incomparables=NULL,sort=F))[,-1],file.path("p-value_Top","Top50_top_MalesvsFemales_Contra_TBI.xls"),row.names=F,sep="\t")
+
+write.table((merge(top_MalesvsFemales_Ipsi_Sham,v$E,by.x="row.names",by.y = "row.names",incomparables=NULL,sort=F))[,-1],file.path("p-value_Top","Top50_top_MalesvsFemales_Ipsi_Sham.xls"),row.names=F,sep="\t")
+
+write.table((merge(top_MalesvsFemales_Contra_Sham,v$E,by.x="row.names",by.y = "row.names",incomparables=NULL,sort=F))[,-1],file.path("p-value_Top","Top50_top_MalesvsFemales_Contra_Sham.xls"),row.names=F,sep="\t")
+
+#All 14 excel files are in the "p-value_Top" folder you just created
+
+```
+
+*SECTION 5b: Plots after testing for DE*
+
+```{r Grouped expression}
+
+# Before following up on the DE genes with further lab work, it is recommended to have a look at the expression levels of the individual samples for the genes of interest. We can quickly look at grouped expression using stripchart. We can use the normalised log expression values in the voom object (v$E)
+
+nice.col <- brewer.pal(6,name="Dark2")
+# pdf("StripchartMalesvsFemales.pdf")
+stripchart(v$E["Xist",]~group,vertical=TRUE,las=2,cex.axis=0.4,pch=16,cex=1.3,col=nice.col,method="jitter",ylab="Normalised log2 expression",main="Xist")
+# dev.off()
+
+nice.col <- brewer.pal(6,name="Dark2")
+# pdf("StripchartShamvsTBI.pdf")
+stripchart(v$E["Tbc1d19",]~group,vertical=TRUE,las=2,cex.axis=0.4,pch=16,cex=1.3,col=nice.col,method="jitter",ylab="Normalised log2 expression",main="Tbc1d19")
+# dev.off()
+
+```
